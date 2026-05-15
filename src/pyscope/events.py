@@ -81,3 +81,19 @@ class EventLog:
 
     def __len__(self) -> int:
         return len(self._events)
+
+
+def event_to_tuple(e: Event) -> tuple[int, str, str, dict[str, Any], int]:
+    """Wire format for msgpack transport between Monitor and sampler subprocess."""
+    return (e.ts_ns, e.label, e.role, dict(e.metadata), e.thread_id)
+
+
+def event_from_tuple(t: tuple) -> Event:
+    ts_ns, label, role, metadata, thread_id = t
+    return Event(
+        ts_ns=int(ts_ns),
+        label=str(label),
+        role=role,  # type: ignore[arg-type]
+        metadata=dict(metadata) if metadata else {},
+        thread_id=int(thread_id),
+    )

@@ -23,16 +23,20 @@ log = logging.getLogger("pyscope.backends.psutil_sys")
 class PsutilSysBackend:
     name = "psutil_sys"
 
-    def __init__(self) -> None:
+    def __init__(self, target_pid: int | None = None) -> None:
         import psutil  # local import; tested via is_available
 
         self._psutil = psutil
-        self._self_proc = psutil.Process(os.getpid())
+        pid = int(target_pid) if target_pid is not None else os.getpid()
+        self._self_proc = psutil.Process(pid)
         # psutil.cpu_percent needs a priming call to set its baseline; the
         # first reading after start() is therefore meaningful.
         psutil.cpu_percent(interval=None, percpu=False)
         psutil.cpu_percent(interval=None, percpu=True)
-        self._self_proc.cpu_percent(interval=None)
+        try:
+            self._self_proc.cpu_percent(interval=None)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
 
     @classmethod
     def is_available(cls) -> bool:

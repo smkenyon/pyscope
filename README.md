@@ -12,10 +12,16 @@ the active span) when those libraries are installed.
 
 ## Mental model: oscilloscope cursors
 
-Imagine a sampler thread that records energy/power/util/memory continuously,
+Imagine a sampler process that records energy/power/util/memory continuously,
 like a scope tracing a signal. You place cursor pairs (`scope("region")`)
 around regions of interest. pyscope answers *what happened between any two
 cursors* — joules consumed, peak RAM, p95 GPU util, wall time, etc.
+
+The sampler lives in a separate subprocess (`pyscope.sampler_main`) that
+watches your process's PID. Annotations from your code are pushed over a
+local `AF_UNIX` datagram socket so the sampler can interleave them with
+its own timestamped samples without ever being blocked by the GIL inside
+your process — see [Architecture](#architecture) below.
 
 - `annotate("x")` → a zero-duration point cursor.
 - `with scope("x"):` → a cursor pair (`x::enter` / `x::exit`).
@@ -31,7 +37,39 @@ uv sync --extra otel             # forward labels to OpenTelemetry
 uv sync --extra cpu-gpu-bench    # torch + torchvision + jax for the GPU examples
 ```
 
-The package isn't on PyPI yet; install from this repo and run via `uv run pyscope`.
+The package isn't on PyPI yet; install from this repo. Three equivalent
+ways to invoke the CLI:
+
+```bash
+uv run pyscope examples/hello.py        # via uv's environment
+python -m pyscope examples/hello.py     # module entry; once the venv is on PATH
+pyscope examples/hello.py               # installed console script
+```
+
+### Rootless RAPL via zeusd
+
+The default `zeus_cpu` backend reads `/sys/class/powercap/intel-rapl/.../energy_uj`,
+which is root-only on most modern Linuxes. Rather than running pyscope as
+root, install [zeusd](https://github.com/ml-energy/zeus) — a small Rust daemon
+that proxies RAPL reads over a Unix socket so unprivileged callers can read
+energy counters:
+
+```bash
+# build from source (no pip/apt package as of writing)
+git clone https://github.com/ml-energy/zeus.git
+cd zeus/zeusd && cargo build --release
+sudo install -m 0755 target/release/zeusd /usr/local/bin/zeusd
+
+# run as a system service or one-shot:
+sudo zeusd --socket-path /var/run/zeusd.sock --rapl-path /sys/class/powercap
+
+# tell zeus (and pyscope's zeus_cpu backend) to use the daemon:
+export ZEUSD_SOCK_PATH=/var/run/zeusd.sock
+```
+
+Without zeusd and without root, `zeus_cpu.is_available()` returns False and
+`tdp_fallback` takes over with a util×TDP estimate — segments are marked
+`source_quality=estimated` in the summary.
 
 ## Use as a library
 
@@ -107,11 +145,47 @@ running.
 | `otel` | `opentelemetry-api` installed | `Span.add_event` on the active span; child span for scopes |
 | `perf` | `/tmp/pyscope-perf.fifo` exists | tab-separated lines for `perf script` consumption (opt-in) |
 
+## Architecture
+
+```
++------------------------------+        AF_UNIX SOCK_DGRAM         +-----------------------------+
+|  user process                |   msgpack(ts, label, role, ...)   |  pyscope.sampler_main       |
+|                              |  ───────────────────────────────► |                             |
+|  pyscope.annotate("x")       |   ("__stop__",)                   |  - binds /tmp/pyscope-*.sock|
+|  pyscope.scope("y"): ...     |                                   |  - prints READY\n           |
+|  fanout: nvtx, otel          |                                   |  - ticks every interval_ms  |
+|                              |                                   |  - per-backend read()       |
+|  Monitor.start()             |                                   |  - writes parquet on stop   |
+|  Monitor.stop()              |                                   |                             |
++--------------+---------------+                                   +-----------------+-----------+
+               │                                                                     │
+               │  reads samples.parquet                                              │  watches target PID
+               │  (after stop)                                                       │  (RSS, per-PID VRAM)
+               ▼                                                                     ▼
+        AnalysisResult                                              <output_dir>/samples.parquet
+        (summary, segments)                                         <output_dir>/events.parquet
+                                                                    <output_dir>/monitor.log
+```
+
+`Monitor.start()` spawns the sampler subprocess with the parent's PID and a
+unique socket path, then waits for a `READY\n` line on the subprocess's
+stdout (2-second timeout) before connecting the datagram socket. Every
+annotation is stamped with `time.monotonic_ns()` in the parent — Linux,
+macOS, and Windows all expose `CLOCK_MONOTONIC` (and equivalents) as a
+system-wide clock, so the parent-stamped timestamps line up correctly with
+samples taken in the subprocess. On `stop()` the parent sends `__stop__`,
+the subprocess flushes parquet files into `--output-dir` and exits, and
+`Monitor.analyze()` reads the samples back to build the `AnalysisResult`.
+
+If you don't pass `--output`, the Monitor creates a tempdir and cleans it
+up on clean exit. Fanout (NVTX, OpenTelemetry) stays in the parent because
+those tracers live in your process.
+
 ## Known gotchas
 
-- **GIL jitter**: the sampler runs in a Python thread. CPU-bound *pure-Python*
-  user code may starve the sampler — `examples/hello.py` uses numpy precisely
-  for this reason. Real ML workloads (torch, jax, numpy) release the GIL.
+- **GIL jitter** *(fixed in v0.2)*: the sampler now runs in its own subprocess
+  (`pyscope.sampler_main`), so user-process GIL pressure can no longer starve
+  it. Pure-Python CPU-bound code samples at the requested cadence too.
 - **RAPL permissions**: `/sys/class/powercap/intel-rapl/.../energy_uj` is
   root-only on most modern Linuxes. `zeus_cpu.is_available()` returns False
   and logs a hint; `tdp_fallback` activates in its place.

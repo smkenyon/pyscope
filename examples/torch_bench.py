@@ -26,7 +26,10 @@ def _require_torch():
     try:
         import torch
     except ImportError:
-        print("This example needs torch. Install: uv sync --extra cpu-gpu-bench", file=sys.stderr)
+        print(
+            "This example needs torch. Install: uv sync --extra cpu-gpu-bench",
+            file=sys.stderr,
+        )
         sys.exit(1)
     return torch
 
@@ -41,8 +44,9 @@ def gpu_only_linalg(torch, target_seconds: float = 5.0) -> None:
         print("gpu_only_linalg: no CUDA device; skipping", file=sys.stderr)
         return
     dev = torch.device("cuda")
-    a = torch.randn(2048, 2048, device=dev, dtype=torch.float32)
-    b = torch.randn(2048, 2048, device=dev, dtype=torch.float32)
+    a = torch.randn(204, 204, device=dev, dtype=torch.float32)
+    b = torch.randn(204, 204, device=dev, dtype=torch.float32)
+    d = torch.randn(204, 204, device=dev, dtype=torch.float32)
     torch.cuda.synchronize()
 
     with pyscope.scope("gpu_only_linalg", target_seconds=target_seconds):
@@ -52,7 +56,7 @@ def gpu_only_linalg(torch, target_seconds: float = 5.0) -> None:
             c = torch.matmul(a, b)
             # SVD is heavy; alternate to keep variety in the workload.
             if i % 4 == 0:
-                _u, _s, _v = torch.linalg.svd(c, full_matrices=False)
+                _u, _s, _v = torch.linalg.svd(d, full_matrices=True)
             a = c.contiguous()
             i += 1
         torch.cuda.synchronize()
@@ -61,16 +65,16 @@ def gpu_only_linalg(torch, target_seconds: float = 5.0) -> None:
 def cpu_only_linalg(torch, target_seconds: float = 5.0) -> None:
     """Same arithmetic pattern as gpu_only_linalg, but on CPU."""
     dev = torch.device("cpu")
-    a = torch.randn(1024, 1024, device=dev, dtype=torch.float32)
-    b = torch.randn(1024, 1024, device=dev, dtype=torch.float32)
-
+    a = torch.randn(10, 10, device=dev, dtype=torch.float32)
+    b = torch.randn(10, 10, device=dev, dtype=torch.float32)
+    d = torch.randn(10, 10, device=dev, dtype=torch.float32)
     with pyscope.scope("cpu_only_linalg", target_seconds=target_seconds):
         start = time.monotonic()
         i = 0
         while time.monotonic() - start < target_seconds:
             c = torch.matmul(a, b)
             if i % 4 == 0:
-                _u, _s, _v = torch.linalg.svd(c, full_matrices=False)
+                _u, _s, _v = torch.linalg.svd(d, full_matrices=True)
             a = c.contiguous()
             i += 1
 
@@ -81,11 +85,11 @@ def heterogeneous_pattern(torch) -> None:
     cpu = torch.device("cpu")
     gpu = torch.device("cuda") if has_cuda else None
 
-    a_cpu = torch.randn(1024, 1024, dtype=torch.float32, device=cpu)
-    b_cpu = torch.randn(1024, 1024, dtype=torch.float32, device=cpu)
+    a_cpu = torch.randn(102, 102, dtype=torch.float32, device=cpu)
+    b_cpu = torch.randn(102, 102, dtype=torch.float32, device=cpu)
     if has_cuda:
-        a_gpu = torch.randn(2048, 2048, dtype=torch.float32, device=gpu)
-        b_gpu = torch.randn(2048, 2048, dtype=torch.float32, device=gpu)
+        a_gpu = torch.randn(204, 204, dtype=torch.float32, device=gpu)
+        b_gpu = torch.randn(204, 204, dtype=torch.float32, device=gpu)
 
     with pyscope.scope("heterogeneous_pattern"):
         for cycle in range(3):

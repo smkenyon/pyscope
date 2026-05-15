@@ -20,6 +20,7 @@ from typing import Optional
 import typer
 
 import pyscope
+from pyscope.backends import registry
 from pyscope.monitor import Monitor
 
 app = typer.Typer(
@@ -29,38 +30,28 @@ app = typer.Typer(
 )
 
 
-def _parse_backends(spec: str | None) -> Optional[list]:
+def _parse_backends(spec: str | None) -> Optional[list[str]]:
     if not spec:
         return None
-    from pyscope.backends._fake import FakeBackend
-
-    name_map = {"fake": FakeBackend}
-    for name, modpath, clsname in [
-        ("psutil_sys", "pyscope.backends.psutil_sys", "PsutilSysBackend"),
-        ("zeus_cpu", "pyscope.backends.zeus_cpu", "ZeusCpuBackend"),
-        ("zeus_gpu", "pyscope.backends.zeus_gpu", "ZeusGpuBackend"),
-        ("nvml_util", "pyscope.backends.nvml_util", "NvmlUtilBackend"),
-        ("zeus_soc", "pyscope.backends.zeus_soc", "ZeusSocBackend"),
-        ("tdp_fallback", "pyscope.backends.tdp_fallback", "TdpFallbackBackend"),
-    ]:
-        try:
-            mod = __import__(modpath, fromlist=[clsname])
-            name_map[name] = getattr(mod, clsname)
-        except Exception:
-            pass
-
     names = [n.strip() for n in spec.split(",") if n.strip()]
-    unknown = [n for n in names if n not in name_map]
+    known = set(registry.available_names())
+    unknown = [n for n in names if n not in known]
     if unknown:
-        raise typer.BadParameter(f"unknown backend(s): {unknown}; known={list(name_map)}")
-    instances = []
+        raise typer.BadParameter(
+            f"unknown backend(s): {unknown}; known={sorted(known)}"
+        )
+    out: list[str] = []
     for n in names:
-        cls = name_map[n]
-        if not cls.is_available():
-            print(f"pyscope: backend {n!r} unavailable; skipping", file=sys.stderr)
+        try:
+            cls = registry.get(n)
+            if not cls.is_available():
+                print(f"pyscope: backend {n!r} unavailable; skipping", file=sys.stderr)
+                continue
+        except Exception:
+            print(f"pyscope: backend {n!r} probe raised; skipping", file=sys.stderr)
             continue
-        instances.append(cls())
-    return instances
+        out.append(n)
+    return out
 
 
 @app.callback(invoke_without_command=True)
@@ -88,10 +79,10 @@ def main(
 
     logging.basicConfig(level=log_level.upper(), format="%(levelname)s %(name)s: %(message)s")
 
-    backend_instances = _parse_backends(backends)
+    backend_names = _parse_backends(backends)
     monitor = Monitor(
         interval_ms=interval_ms,
-        backends=backend_instances,
+        backends=backend_names,
         fanout=[] if no_fanout else None,
         output_dir=output,
     )

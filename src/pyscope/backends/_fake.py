@@ -26,11 +26,13 @@ class FakeBackend:
         self,
         energy_step_mj: float = 10.0,
         util_cycle: tuple[float, ...] = (10.0, 50.0, 90.0, 50.0),
+        target_pid: int | None = None,
     ) -> None:
         self.energy_step_mj = float(energy_step_mj)
         self.util_cycle = tuple(util_cycle)
         self._energy_mj: float = 0.0
         self._tick: int = 0
+        self._target_pid = target_pid
 
     @classmethod
     def is_available(cls) -> bool:
@@ -44,6 +46,27 @@ class FakeBackend:
             ("fake_energy_mj", self._energy_mj, "energy_mj"),
             ("fake_util_pct", util, "util_pct"),
         ]
+
+    def close(self) -> None:
+        return None
+
+
+class FlakyBackend:
+    """Always-failing backend, used in tests to exercise the sampler's
+    per-backend failure isolation path. Hidden behind the registry name
+    ``flaky``."""
+
+    name = "flaky"
+
+    def __init__(self, target_pid: int | None = None) -> None:
+        self._target_pid = target_pid
+
+    @classmethod
+    def is_available(cls) -> bool:
+        return True
+
+    def read(self) -> Iterable[Sample]:
+        raise RuntimeError("flaky backend always fails")
 
     def close(self) -> None:
         return None

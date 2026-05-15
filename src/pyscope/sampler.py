@@ -1,22 +1,19 @@
-"""The sampler thread.
+"""Thread-less sample loop used by the subprocess sampler.
 
-One thread per Monitor. On every tick it calls `read()` on each backend and
-appends ``(ts_ns, source, domain, value, kind)`` tuples to per-backend lists.
-Lists are Python lists; `list.append` is atomic under the GIL, and analysis
-runs only after `stop()` joins the thread.
+`SampleLoop` owns one `BackendBuffer` per backend, ticks at a fixed interval,
+and tolerates per-backend failure (drops a backend after MAX_BACKEND_FAILS
+consecutive errors). Drift correction: tick N targets
+``start_monotonic_ns + N * interval_ns``; on overrun we skip ticks rather
+than play catch-up.
 
-Drift correction: tick N fires at ``start_monotonic_ns + N * interval_ns``.
-On overrun, we skip ticks rather than play catch-up (logged once).
-
-Per-backend failure isolation: if a backend raises in `read()`, we log once
-and increment a fail counter. After ``MAX_BACKEND_FAILS`` consecutive
-failures the backend is dropped from the rotation for the rest of the run.
+This module no longer spawns a thread — the sampler subprocess
+(`pyscope.sampler_main`) drives it on its own process's main thread, which
+is why the GIL no longer matters.
 """
 
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from dataclasses import dataclass, field
 
@@ -35,74 +32,69 @@ class BackendBuffer:
     dropped: bool = False
 
 
-class Sampler:
+class SampleLoop:
+    """Drift-corrected polling loop. Caller drives it via ``tick_if_due()``."""
+
     def __init__(self, backends: list[Backend], interval_ms: int) -> None:
         if interval_ms <= 0:
             raise ValueError("interval_ms must be positive")
         self.interval_ns: int = int(interval_ms) * 1_000_000
         self.buffers: list[BackendBuffer] = [BackendBuffer(b) for b in backends]
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
         self._start_monotonic_ns: int = 0
+        self._tick_n: int = 0
         self._skipped_ticks_logged: bool = False
+        self._started: bool = False
 
     def start(self) -> None:
-        if self._thread is not None:
-            raise RuntimeError("Sampler already started")
         self._start_monotonic_ns = time.monotonic_ns()
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="pyscope-sampler", daemon=True)
-        self._thread.start()
+        self._started = True
 
-    def stop(self, timeout: float = 5.0) -> None:
-        if self._thread is None:
-            return
-        self._stop.set()
-        self._thread.join(timeout=timeout)
-        self._thread = None
+    @property
+    def start_monotonic_ns(self) -> int:
+        return self._start_monotonic_ns
+
+    def next_tick_ns(self) -> int:
+        """Absolute monotonic_ns at which the next tick should fire."""
+        return self._start_monotonic_ns + self._tick_n * self.interval_ns
+
+    def tick_if_due(self, now_ns: int | None = None) -> bool:
+        """Sample once if the next scheduled tick is due. Returns True if it fired."""
+        if not self._started:
+            raise RuntimeError("SampleLoop.start() must be called first")
+        if now_ns is None:
+            now_ns = time.monotonic_ns()
+        target = self.next_tick_ns()
+        if now_ns < target:
+            return False
+        # If we're more than one interval behind, skip ahead instead of
+        # playing catch-up (logged once).
+        if now_ns - target >= self.interval_ns:
+            missed = (now_ns - target) // self.interval_ns
+            if missed > 0 and not self._skipped_ticks_logged:
+                log.warning(
+                    "sampler running behind: skipping %d ticks at interval=%d ns",
+                    missed,
+                    self.interval_ns,
+                )
+                self._skipped_ticks_logged = True
+            self._tick_n += int(missed)
+        self._sample_once(now_ns)
+        self._tick_n += 1
+        return True
+
+    def close(self) -> None:
         for buf in self.buffers:
             try:
                 buf.backend.close()
             except Exception:
                 log.exception("backend %s.close() raised", buf.backend.name)
 
-    @property
-    def start_monotonic_ns(self) -> int:
-        return self._start_monotonic_ns
-
     def all_samples(self) -> list[tuple[int, str, str, float, str]]:
-        """Flatten per-backend sample lists. Call after stop()."""
         out: list[tuple[int, str, str, float, str]] = []
         for buf in self.buffers:
             out.extend(buf.samples)
         out.sort(key=lambda row: row[0])
         return out
-
-    def _run(self) -> None:
-        n = 0
-        while not self._stop.is_set():
-            target_ns = self._start_monotonic_ns + n * self.interval_ns
-            now = time.monotonic_ns()
-            wait_s = (target_ns - now) / 1e9
-            if wait_s > 0:
-                # threading.Event.wait returns True on set; we want to bail out fast.
-                if self._stop.wait(wait_s):
-                    break
-            else:
-                # We're already past the target. Count missed ticks once.
-                missed = max(0, (now - target_ns) // self.interval_ns)
-                if missed > 0 and not self._skipped_ticks_logged:
-                    log.warning(
-                        "sampler running behind: skipping %d ticks at interval=%d ns",
-                        missed,
-                        self.interval_ns,
-                    )
-                    self._skipped_ticks_logged = True
-                n += int(missed)
-
-            ts_ns = time.monotonic_ns()
-            self._sample_once(ts_ns)
-            n += 1
 
     def _sample_once(self, ts_ns: int) -> None:
         for buf in self.buffers:

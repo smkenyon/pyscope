@@ -35,7 +35,7 @@ def _safe_nvml_init(pynvml) -> None:
 class NvmlUtilBackend:
     name = "nvml_util"
 
-    def __init__(self) -> None:
+    def __init__(self, target_pid: int | None = None) -> None:
         import psutil
         import pynvml
 
@@ -46,7 +46,11 @@ class NvmlUtilBackend:
         count = pynvml.nvmlDeviceGetCount()
         for i in range(count):
             self._handles.append(pynvml.nvmlDeviceGetHandleByIndex(i))
-        self._self_proc = psutil.Process(os.getpid())
+        self._target_pid = int(target_pid) if target_pid is not None else os.getpid()
+        try:
+            self._self_proc = psutil.Process(self._target_pid)
+        except psutil.NoSuchProcess:
+            self._self_proc = None
 
     @classmethod
     def is_available(cls) -> bool:
@@ -61,7 +65,9 @@ class NvmlUtilBackend:
             return False
 
     def _pids_of_interest(self) -> set[int]:
-        pids = {os.getpid()}
+        pids = {self._target_pid}
+        if self._self_proc is None:
+            return pids
         try:
             for child in self._self_proc.children(recursive=True):
                 pids.add(child.pid)
