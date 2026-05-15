@@ -23,7 +23,7 @@ rich = ["rich>=13"]
 cpu-gpu-bench = [
     "torch>=2.2",
     "torchvision>=0.17",
-    "jax[cuda12]>=0.4.30; sys_platform == 'linux'",
+    "jax>=0.4.30; sys_platform == 'linux'",
     "jaxlib>=0.4.30",
     "pillow>=10",
 ]
