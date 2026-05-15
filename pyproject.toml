@@ -1,0 +1,49 @@
+[project]
+name = "pyscope"
+version = "0.1.0"
+description = "Energy, power, and resource monitoring for Python with nvtx-like annotation blocks."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "zeus>=0.15.0",
+    "polars>=1.40.1",
+    "psutil>=5.9",
+    "typer>=0.12",
+    "matplotlib>=3.10.9",
+    "numpy>=2.4.4",
+    "scipy>=1.17.1",
+]
+
+[project.optional-dependencies]
+nvml = ["nvidia-ml-py>=12"]
+apple = ["zeus-apple-silicon"]
+nvtx = ["nvtx"]
+otel = ["opentelemetry-api"]
+rich = ["rich>=13"]
+cpu-gpu-bench = [
+    "torch>=2.2",
+    "torchvision>=0.17",
+    "jax[cuda12]>=0.4.30; sys_platform == 'linux'",
+    "jaxlib>=0.4.30",
+    "pillow>=10",
+]
+
+[project.scripts]
+pyscope = "pyscope.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pyscope"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.13",
+    "pytest>=8",
+    "pyright>=1.1.380",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
